@@ -5,7 +5,7 @@ Produces trained models for:
 1. Fault Classifier (Normal, Inner Race Fault, Ball Fault, Outer Race Fault)
 2. Motor Load Classifier (0 HP, 1 HP, 2 HP, 3 HP)
 3. Out-of-Distribution (OOD) / Anomaly Detector (IsolationForest)
-Saves models and comprehensive evaluation metrics to disk.
+Saves trained models and comprehensive evaluation metrics to disk.
 """
 
 from pathlib import Path
@@ -60,10 +60,12 @@ FEATURE_NAMES = [
     'env_bpfo_band_energy', 'env_bpfi_band_energy', 'env_bsf_band_energy'
 ]
 
+
 def extract_comprehensive_features(x, fs=12000):
-    """Extracts 31 time-domain, frequency-domain, and envelope-domain features from vibration signal."""
+    """Extracts 31 time-domain, frequency-domain, and envelope-domain features."""
     x = np.asarray(x, dtype=float).reshape(-1)
     n = len(x)
+
     if n < 64:
         raise ValueError('Signal sample count is too small for feature extraction.')
 
@@ -76,8 +78,12 @@ def extract_comprehensive_features(x, fs=12000):
     kurt_val = float(kurtosis(x, fisher=True, bias=True))
     peak_val = float(np.max(abs_x))
     ptp_val = float(np.ptp(x))
-    mean_abs = float(np.mean(abs_x)) if float(np.mean(abs_x)) > 1e-12 else 1e-12
-    mean_sqrt = float(np.mean(np.sqrt(abs_x))) ** 2 if float(np.mean(np.sqrt(abs_x))) > 1e-12 else 1e-12
+
+    mean_abs = float(np.mean(abs_x))
+    mean_abs = mean_abs if mean_abs > 1e-12 else 1e-12
+
+    mean_sqrt_val = float(np.mean(np.sqrt(abs_x)))
+    mean_sqrt = mean_sqrt_val ** 2 if mean_sqrt_val > 1e-12 else 1e-12
 
     crest_factor = peak_val / (rms + 1e-12)
     shape_factor = rms / mean_abs
@@ -88,6 +94,7 @@ def extract_comprehensive_features(x, fs=12000):
     freq = np.fft.rfftfreq(n, 1 / fs)
     win = np.hanning(n)
     mag = 2 * np.abs(np.fft.rfft((x - mean_val) * win)) / max(np.sum(win), 1)
+
     mask = freq <= 5000
     f_sub, a_sub = freq[mask], mag[mask]
 
@@ -95,9 +102,17 @@ def extract_comprehensive_features(x, fs=12000):
     dom_freq = float(f_sub[np.argmax(a_sub)]) if len(a_sub) > 0 else 0.0
     spec_energy = float(np.sum(a_sub ** 2))
     spec_centroid = float(np.sum(f_sub * a_sub) / sum_a)
-    spec_spread = float(np.sqrt(np.sum(((f_sub - spec_centroid) ** 2) * a_sub) / sum_a))
-    spec_skew = float(np.sum(((f_sub - spec_centroid) ** 3) * a_sub) / ((spec_spread ** 3 + 1e-12) * sum_a))
-    spec_kurt = float(np.sum(((f_sub - spec_centroid) ** 4) * a_sub) / ((spec_spread ** 4 + 1e-12) * sum_a))
+    spec_spread = float(
+        np.sqrt(np.sum(((f_sub - spec_centroid) ** 2) * a_sub) / sum_a)
+    )
+    spec_skew = float(
+        np.sum(((f_sub - spec_centroid) ** 3) * a_sub)
+        / ((spec_spread ** 3 + 1e-12) * sum_a)
+    )
+    spec_kurt = float(
+        np.sum(((f_sub - spec_centroid) ** 4) * a_sub)
+        / ((spec_spread ** 4 + 1e-12) * sum_a)
+    )
 
     b1 = float(np.sum(a_sub[(f_sub >= 0) & (f_sub < 100)] ** 2))
     b2 = float(np.sum(a_sub[(f_sub >= 100) & (f_sub < 500)] ** 2))
@@ -109,9 +124,11 @@ def extract_comprehensive_features(x, fs=12000):
     try:
         low = max(100.0, fs * 0.08)
         high = min(5000.0, fs * 0.42)
+
         sos = butter(4, [low, high], btype='bandpass', fs=fs, output='sos')
         filtered = sosfiltfilt(sos, x)
         env = np.abs(hilbert(filtered))
+
         env_rms = float(np.sqrt(np.mean(env ** 2)))
         env_peak = float(np.max(env))
         env_crest = env_peak / (env_rms + 1e-12)
@@ -120,144 +137,360 @@ def extract_comprehensive_features(x, fs=12000):
         env_n = len(env)
         env_f = np.fft.rfftfreq(env_n, 1 / fs)
         env_win = np.hanning(env_n)
-        env_mag = 2 * np.abs(np.fft.rfft((env - np.mean(env)) * env_win)) / max(np.sum(env_win), 1)
+
+        env_mag = (
+            2 * np.abs(np.fft.rfft((env - np.mean(env)) * env_win))
+            / max(np.sum(env_win), 1)
+        )
+
         env_mask = (env_f >= 5) & (env_f <= 800)
         ef_sub, ea_sub = env_f[env_mask], env_mag[env_mask]
-        env_dom_freq = float(ef_sub[np.argmax(ea_sub)]) if len(ea_sub) > 0 else 0.0
+
+        env_dom_freq = (
+            float(ef_sub[np.argmax(ea_sub)]) if len(ea_sub) > 0 else 0.0
+        )
         env_spec_energy = float(np.sum(ea_sub ** 2))
 
         # Bearing characteristic fault bands in envelope spectrum
-        bpfo_energy = float(np.sum(ea_sub[(ef_sub >= 95) & (ef_sub <= 118)] ** 2))
-        bpfi_energy = float(np.sum(ea_sub[(ef_sub >= 148) & (ef_sub <= 172)] ** 2))
-        bsf_energy = float(np.sum(ea_sub[(ef_sub >= 128) & (ef_sub <= 148)] ** 2))
+        bpfo_energy = float(
+            np.sum(ea_sub[(ef_sub >= 95) & (ef_sub <= 118)] ** 2)
+        )
+        bpfi_energy = float(
+            np.sum(ea_sub[(ef_sub >= 148) & (ef_sub <= 172)] ** 2)
+        )
+        bsf_energy = float(
+            np.sum(ea_sub[(ef_sub >= 128) & (ef_sub <= 148)] ** 2)
+        )
+
     except Exception:
-        env_rms, env_peak, env_crest, env_kurt = rms, peak_val, crest_factor, kurt_val
+        env_rms, env_peak = rms, peak_val
+        env_crest, env_kurt = crest_factor, kurt_val
         env_dom_freq, env_spec_energy = dom_freq, spec_energy
         bpfo_energy, bpfi_energy, bsf_energy = 0.0, 0.0, 0.0
 
     return {
-        'rms': rms, 'mean': mean_val, 'std': std_val, 'var': var_val,
-        'skewness': skew_val, 'kurtosis': kurt_val, 'peak': peak_val, 'ptp': ptp_val,
-        'crest_factor': crest_factor, 'shape_factor': shape_factor,
-        'impulse_factor': impulse_factor, 'margin_factor': margin_factor,
-        'dominant_freq': dom_freq, 'spectral_centroid': spec_centroid,
-        'spectral_spread': spec_spread, 'spectral_skewness': spec_skew,
-        'spectral_kurtosis': spec_kurt, 'spectral_energy': spec_energy,
-        'band_0_100_ratio': b1 / tot_b, 'band_100_500_ratio': b2 / tot_b,
-        'band_500_2000_ratio': b3 / tot_b, 'band_2000_5000_ratio': b4 / tot_b,
-        'env_rms': env_rms, 'env_peak': env_peak, 'env_crest': env_crest,
-        'env_kurtosis': env_kurt, 'env_dominant_freq': env_dom_freq,
+        'rms': rms,
+        'mean': mean_val,
+        'std': std_val,
+        'var': var_val,
+        'skewness': skew_val,
+        'kurtosis': kurt_val,
+        'peak': peak_val,
+        'ptp': ptp_val,
+        'crest_factor': crest_factor,
+        'shape_factor': shape_factor,
+        'impulse_factor': impulse_factor,
+        'margin_factor': margin_factor,
+        'dominant_freq': dom_freq,
+        'spectral_centroid': spec_centroid,
+        'spectral_spread': spec_spread,
+        'spectral_skewness': spec_skew,
+        'spectral_kurtosis': spec_kurt,
+        'spectral_energy': spec_energy,
+        'band_0_100_ratio': b1 / tot_b,
+        'band_100_500_ratio': b2 / tot_b,
+        'band_500_2000_ratio': b3 / tot_b,
+        'band_2000_5000_ratio': b4 / tot_b,
+        'env_rms': env_rms,
+        'env_peak': env_peak,
+        'env_crest': env_crest,
+        'env_kurtosis': env_kurt,
+        'env_dominant_freq': env_dom_freq,
         'env_spectral_energy': env_spec_energy,
         'env_bpfo_band_energy': bpfo_energy,
         'env_bpfi_band_energy': bpfi_energy,
         'env_bsf_band_energy': bsf_energy
     }
 
+
 def build_dataset():
     records = []
+
     print(f'Loading {len(FILES_META)} authentic CWRU recordings from: {DATA_DIR}')
+
     for fn, (fault, load, key) in FILES_META.items():
         fp = DATA_DIR / fn
+
         if not fp.exists():
             print(f'Warning: {fn} not found in {DATA_DIR}')
             continue
+
         m = loadmat(str(fp))
         x_full = np.asarray(m[key], dtype=float).reshape(-1)
+
         n_windows = min(len(x_full) // WINDOW_SIZE, MAX_WINDOWS)
+
         for i in range(n_windows):
-            chunk = x_full[i * WINDOW_SIZE : (i + 1) * WINDOW_SIZE]
+            chunk = x_full[i * WINDOW_SIZE: (i + 1) * WINDOW_SIZE]
             feats = extract_comprehensive_features(chunk, FS)
+
             feats['fault_class'] = fault
             feats['load_class'] = load
             feats['file_name'] = fn
+
             records.append(feats)
 
     df = pd.DataFrame(records)
-    print(f'Constructed training dataset: {len(df)} samples across {df["fault_class"].nunique()} fault classes and {df["load_class"].nunique()} load classes.')
+
+    print(
+        f'Constructed training dataset: {len(df)} samples across '
+        f'{df["fault_class"].nunique()} fault classes and '
+        f'{df["load_class"].nunique()} load classes.'
+    )
+
     return df
+
 
 def train_and_evaluate():
     df = build_dataset()
-    X = df[FEATURE_NAMES].values
-    y_fault = df['fault_class'].values
-    y_load = df['load_class'].values
+
+    # Check whether training data is available
+    if df.empty:
+        raise ValueError(
+            f'No training samples were created. Check CWRU data files in: {DATA_DIR}'
+        )
+
+    # FIX: Convert Pandas columns into standard NumPy arrays.
+    # This prevents Arrow-backed Pandas indexing errors in scikit-learn.
+    X = df[FEATURE_NAMES].to_numpy(dtype=np.float64, copy=True)
+
+    y_fault = df['fault_class'].to_numpy(dtype=object, copy=True)
+    y_load = df['load_class'].to_numpy(dtype=object, copy=True)
+    groups = df['load_class'].to_numpy(dtype=object, copy=True)
+
+    # Validate numerical features
+    if not np.isfinite(X).all():
+        raise ValueError('Training features contain NaN or infinite values.')
+
+    if len(np.unique(y_fault)) < 2 or len(np.unique(y_load)) < 2:
+        raise ValueError(
+            'Training requires at least two fault classes and two load classes.'
+        )
+
+    # Each class must have enough samples for 5-fold cross-validation
+    if np.min(np.unique(y_fault, return_counts=True)[1]) < 5:
+        raise ValueError(
+            'Each fault class must contain at least 5 samples for 5-fold cross-validation.'
+        )
+
+    if np.min(np.unique(y_load, return_counts=True)[1]) < 5:
+        raise ValueError(
+            'Each load class must contain at least 5 samples for 5-fold cross-validation.'
+        )
 
     # Stratified 5-Fold Cross Validation for Fault Classification
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    skf = StratifiedKFold(
+        n_splits=5,
+        shuffle=True,
+        random_state=42
+    )
+
     rf_fault_pipe = Pipeline([
         ('scaler', StandardScaler()),
-        ('clf', RandomForestClassifier(n_estimators=100, max_depth=12, random_state=42))
+        ('clf', RandomForestClassifier(
+            n_estimators=100,
+            max_depth=12,
+            random_state=42
+        ))
     ])
-    fault_cv_preds = cross_val_predict(rf_fault_pipe, X, y_fault, cv=skf)
-    fault_acc = float(accuracy_score(y_fault, fault_cv_preds))
-    fault_report = classification_report(y_fault, fault_cv_preds, output_dict=True)
-    fault_cm = confusion_matrix(y_fault, fault_cv_preds, labels=sorted(list(set(y_fault)))).tolist()
 
-    print(f'\n=== FAULT CLASSIFIER EVALUATION ===')
+    fault_cv_preds = cross_val_predict(
+        rf_fault_pipe,
+        X,
+        y_fault,
+        cv=skf
+    )
+
+    fault_acc = float(accuracy_score(y_fault, fault_cv_preds))
+
+    fault_report = classification_report(
+        y_fault,
+        fault_cv_preds,
+        output_dict=True
+    )
+
+    fault_cm = confusion_matrix(
+        y_fault,
+        fault_cv_preds,
+        labels=sorted(list(set(y_fault)))
+    ).tolist()
+
+    print('\n=== FAULT CLASSIFIER EVALUATION ===')
     print(f'5-Fold Stratified Accuracy: {fault_acc * 100:.2f}%')
+
     for cls_name, m in fault_report.items():
         if isinstance(m, dict):
-            print(f'  {cls_name:18s} Precision: {m["precision"]:.3f} | Recall: {m["recall"]:.3f} | F1: {m["f1-score"]:.3f}')
+            print(
+                f'  {cls_name:18s} '
+                f'Precision: {m["precision"]:.3f} | '
+                f'Recall: {m["recall"]:.3f} | '
+                f'F1: {m["f1-score"]:.3f}'
+            )
 
-    # Leave-One-Load-Out validation for Fault Classifier (Cross-Load Generalization)
+    # Leave-One-Load-Out validation for Fault Classifier
     logo = LeaveOneGroupOut()
+
     lolo_preds, lolo_true = [], []
-    for train_idx, test_idx in logo.split(X, y_fault, groups=df['load_class'].values):
+
+    for train_idx, test_idx in logo.split(X, y_fault, groups=groups):
         rf_fault_pipe.fit(X[train_idx], y_fault[train_idx])
-        lolo_preds.extend(rf_fault_pipe.predict(X[test_idx]))
+
+        lolo_preds.extend(
+            rf_fault_pipe.predict(X[test_idx])
+        )
+
         lolo_true.extend(y_fault[test_idx])
+
     lolo_acc = float(accuracy_score(lolo_true, lolo_preds))
-    print(f'Leave-One-Load-Out Fault Accuracy (Generalization across unseen motor loads): {lolo_acc * 100:.2f}%')
+
+    print(
+        'Leave-One-Load-Out Fault Accuracy '
+        f'(Generalization across unseen motor loads): {lolo_acc * 100:.2f}%'
+    )
 
     # Stratified 5-Fold Cross Validation for Operating Load Classification
     rf_load_pipe = Pipeline([
         ('scaler', StandardScaler()),
-        ('clf', RandomForestClassifier(n_estimators=100, max_depth=12, random_state=42))
+        ('clf', RandomForestClassifier(
+            n_estimators=100,
+            max_depth=12,
+            random_state=42
+        ))
     ])
-    load_cv_preds = cross_val_predict(rf_load_pipe, X, y_load, cv=skf)
-    load_acc = float(accuracy_score(y_load, load_cv_preds))
-    load_report = classification_report(y_load, load_cv_preds, output_dict=True)
-    load_cm = confusion_matrix(y_load, load_cv_preds, labels=sorted(list(set(y_load)))).tolist()
 
-    print(f'\n=== LOAD CLASSIFIER EVALUATION ===')
+    load_cv_preds = cross_val_predict(
+        rf_load_pipe,
+        X,
+        y_load,
+        cv=skf
+    )
+
+    load_acc = float(accuracy_score(y_load, load_cv_preds))
+
+    load_report = classification_report(
+        y_load,
+        load_cv_preds,
+        output_dict=True
+    )
+
+    load_cm = confusion_matrix(
+        y_load,
+        load_cv_preds,
+        labels=sorted(list(set(y_load)))
+    ).tolist()
+
+    print('\n=== LOAD CLASSIFIER EVALUATION ===')
     print(f'5-Fold Stratified Accuracy: {load_acc * 100:.2f}%')
+
     for cls_name, m in load_report.items():
         if isinstance(m, dict):
-            print(f'  {cls_name:18s} Precision: {m["precision"]:.3f} | Recall: {m["recall"]:.3f} | F1: {m["f1-score"]:.3f}')
+            print(
+                f'  {cls_name:18s} '
+                f'Precision: {m["precision"]:.3f} | '
+                f'Recall: {m["recall"]:.3f} | '
+                f'F1: {m["f1-score"]:.3f}'
+            )
 
     # Train Final Full Production Models
     print('\nTraining final production models on full CWRU benchmark...')
+
     rf_fault_pipe.fit(X, y_fault)
     rf_load_pipe.fit(X, y_load)
 
-    # Train Out-of-Distribution (OOD) Detector on In-Distribution Feature Space
+    # Train Out-of-Distribution (OOD) Detector
     scaler_ood = StandardScaler()
     X_scaled = scaler_ood.fit_transform(X)
-    iso_forest = IsolationForest(n_estimators=100, contamination=0.03, random_state=42)
+
+    iso_forest = IsolationForest(
+        n_estimators=100,
+        contamination=0.03,
+        random_state=42
+    )
+
     iso_forest.fit(X_scaled)
-    ood_pipe = Pipeline([('scaler', scaler_ood), ('iso', iso_forest)])
+
+    ood_pipe = Pipeline([
+        ('scaler', scaler_ood),
+        ('iso', iso_forest)
+    ])
 
     # Feature Importances
     fault_clf_rf = rf_fault_pipe.named_steps['clf']
-    fault_feat_imp = {fn: round(float(imp), 4) for fn, imp in zip(FEATURE_NAMES, fault_clf_rf.feature_importances_)}
-    fault_feat_imp = dict(sorted(fault_feat_imp.items(), key=lambda item: item[1], reverse=True))
+
+    fault_feat_imp = {
+        fn: round(float(imp), 4)
+        for fn, imp in zip(
+            FEATURE_NAMES,
+            fault_clf_rf.feature_importances_
+        )
+    }
+
+    fault_feat_imp = dict(
+        sorted(
+            fault_feat_imp.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+    )
 
     load_clf_rf = rf_load_pipe.named_steps['clf']
-    load_feat_imp = {fn: round(float(imp), 4) for fn, imp in zip(FEATURE_NAMES, load_clf_rf.feature_importances_)}
-    load_feat_imp = dict(sorted(load_feat_imp.items(), key=lambda item: item[1], reverse=True))
+
+    load_feat_imp = {
+        fn: round(float(imp), 4)
+        for fn, imp in zip(
+            FEATURE_NAMES,
+            load_clf_rf.feature_importances_
+        )
+    }
+
+    load_feat_imp = dict(
+        sorted(
+            load_feat_imp.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+    )
 
     # Serialize Models
-    joblib.dump(rf_fault_pipe, MODELS_DIR / 'fault_classifier.joblib')
-    joblib.dump(rf_load_pipe, MODELS_DIR / 'load_classifier.joblib')
-    joblib.dump(ood_pipe, MODELS_DIR / 'ood_detector.joblib')
+    joblib.dump(
+        rf_fault_pipe,
+        MODELS_DIR / 'fault_classifier.joblib'
+    )
+
+    joblib.dump(
+        rf_load_pipe,
+        MODELS_DIR / 'load_classifier.joblib'
+    )
+
+    joblib.dump(
+        ood_pipe,
+        MODELS_DIR / 'ood_detector.joblib'
+    )
 
     # Also mirror into Bearing-Fault-Diagnosis-main if present
-    mirror_dir = Path(__file__).resolve().parent.parent / 'Bearing-Fault-Diagnosis-main' / 'models'
+    mirror_dir = (
+        Path(__file__).resolve().parent.parent
+        / 'Bearing-Fault-Diagnosis-main'
+        / 'models'
+    )
+
     if mirror_dir.parent.exists():
         mirror_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(rf_fault_pipe, mirror_dir / 'fault_classifier.joblib')
-        joblib.dump(rf_load_pipe, mirror_dir / 'load_classifier.joblib')
-        joblib.dump(ood_pipe, mirror_dir / 'ood_detector.joblib')
+
+        joblib.dump(
+            rf_fault_pipe,
+            mirror_dir / 'fault_classifier.joblib'
+        )
+
+        joblib.dump(
+            rf_load_pipe,
+            mirror_dir / 'load_classifier.joblib'
+        )
+
+        joblib.dump(
+            ood_pipe,
+            mirror_dir / 'ood_detector.joblib'
+        )
 
     metadata = {
         'training_source': 'CWRU 12 kHz Drive-End Accelerometer Benchmark',
@@ -265,8 +498,10 @@ def train_and_evaluate():
         'window_size': WINDOW_SIZE,
         'total_training_samples': len(df),
         'features': FEATURE_NAMES,
+
         'fault_classes': sorted(list(set(y_fault))),
         'load_classes': sorted(list(set(y_load))),
+
         'evaluation': {
             'fault_classification': {
                 '5_fold_cv_accuracy': round(fault_acc, 4),
@@ -275,6 +510,7 @@ def train_and_evaluate():
                 'confusion_matrix': fault_cm,
                 'top_features': dict(list(fault_feat_imp.items())[:8])
             },
+
             'load_classification': {
                 '5_fold_cv_accuracy': round(load_acc, 4),
                 'report': load_report,
@@ -282,9 +518,14 @@ def train_and_evaluate():
                 'top_features': dict(list(load_feat_imp.items())[:8])
             }
         },
+
         'multi_fault_status': {
             'supported': False,
-            'reason': 'CWRU Drive-End benchmark contains single-defect bearings only. No simultaneous multi-defect ground truth recordings exist in authentic dataset.'
+            'reason': (
+                'CWRU Drive-End benchmark contains single-defect bearings only. '
+                'No simultaneous multi-defect ground truth recordings exist '
+                'in authentic dataset.'
+            )
         }
     }
 
@@ -296,7 +537,9 @@ def train_and_evaluate():
             json.dump(metadata, f, indent=2)
 
     print(f'Successfully trained and saved all models to: {MODELS_DIR}')
+
     return metadata
+
 
 if __name__ == '__main__':
     train_and_evaluate()
